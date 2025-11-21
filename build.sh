@@ -51,7 +51,7 @@ echo "======== 6. Build RetroArch WASM linker ========"
 cd "$RETROARCH_DIR"
 
 emmake make -f Makefile.emscripten LIBRETRO=${CORE_NAME} clean
-emmake make -f Makefile.emscripten LIBRETRO=${CORE_NAME} -j all
+emmake make -f Makefile.emscripten LIBRETRO=${CORE_NAME} -j all VERBOSE=1
 
 echo "======== 7. Export output ========"
 cp ${CORE_NAME}_libretro.js   "../$OUTPUT_DIR/${CORE_NAME}.js"

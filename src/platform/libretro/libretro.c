@@ -4,6 +4,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "libretro.h"
+#include <emscripten/emscripten.h>
 
 #include <mgba-util/common.h>
 
@@ -2377,6 +2378,16 @@ size_t retro_get_memory_size(unsigned id) {
 		break;
 	}
 	return 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint8_t* wasm_get_system_ram_ptr() {
+    return (uint8_t*)retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
+}
+
+EMSCRIPTEN_KEEPALIVE
+int wasm_get_system_ram_size() {
+    return retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM);
 }
 
 void GBARetroLog(struct mLogger* logger, int category, enum mLogLevel level, const char* format, va_list args) {
