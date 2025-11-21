@@ -5,13 +5,14 @@ CORE_NAME="mgba"
 BUILD_DIR="build-emscripten"
 OUTPUT_DIR="dist-wasm"
 
-RETROARCH_DIR="./retroarch-linker"   # RetroArch komt lokaal hier
+RETROARCH_DIR="./retroarch-linker"   # Neem deze zelf op in je eigen repo
 CORE_BC="${CORE_NAME}_libretro_emscripten.bc"
 
-echo "======== 1. Prepare RetroArch linker ========"
+echo "======== 1. Ensure RetroArch linker directory exists ========"
 if [ ! -d "$RETROARCH_DIR" ]; then
-  echo "Cloning RetroArch once..."
-  git clone https://github.com/libretro/RetroArch.git "$RETROARCH_DIR"
+  echo "ERROR: retroarch-linker directory missing!"
+  echo "Kopieer de RetroArch linker map 1-op-1 in je eigen repo."
+  exit 1
 fi
 
 echo "======== 2. Clean old builds ========"
@@ -28,16 +29,31 @@ if [ ! -f "$CORE_BC" ]; then
   exit 1
 fi
 
-echo "======== 4. Copy BC into RetroArch linker ========"
+echo "======== 4. Inject custom SGB border INTO MGBA CORE ========"
+CUSTOM_BORDER="./custom-assets/sgb-border.png"
+MGBA_BORDER="./src/platform/libretro/assets/sgb-border.png"
+
+if [ -f "$CUSTOM_BORDER" ]; then
+  if [ -f "$MGBA_BORDER" ]; then
+    cp "$CUSTOM_BORDER" "$MGBA_BORDER"
+    echo "Custom border applied to mGBA"
+  else
+    echo "WARNING: mGBA border path not found: $MGBA_BORDER"
+  fi
+else
+  echo "No custom border provided"
+fi
+
+echo "======== 5. Copy core BC into RetroArch linker ========"
 cp "$CORE_BC" "$RETROARCH_DIR/libretro_emscripten.bc"
 
-echo "======== 5. Link using RetroArch Makefile.emscripten ========"
+echo "======== 6. Build RetroArch WASM linker ========"
 cd "$RETROARCH_DIR"
 
-# Build frontend + wasm core using RetroArch linker
+emmake make -f Makefile.emscripten LIBRETRO=${CORE_NAME} clean
 emmake make -f Makefile.emscripten LIBRETRO=${CORE_NAME} -j all
 
-echo "======== 6. Rename output to remove libretro prefix ========"
+echo "======== 7. Export output ========"
 cp ${CORE_NAME}_libretro.js   "../$OUTPUT_DIR/${CORE_NAME}.js"
 cp ${CORE_NAME}_libretro.wasm "../$OUTPUT_DIR/${CORE_NAME}.wasm"
 
