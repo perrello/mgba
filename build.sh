@@ -5,41 +5,45 @@ CORE_NAME="mgba"
 BUILD_DIR="build-emscripten"
 OUTPUT_DIR="dist-wasm"
 
-echo "======== 1. Cleaning old builds ========"
+RETROARCH_DIR="./retroarch-linker"   # RetroArch komt lokaal hier
+CORE_BC="${CORE_NAME}_libretro_emscripten.bc"
+
+echo "======== 1. Prepare RetroArch linker ========"
+if [ ! -d "$RETROARCH_DIR" ]; then
+  echo "Cloning RetroArch once..."
+  git clone https://github.com/libretro/RetroArch.git "$RETROARCH_DIR"
+fi
+
+echo "======== 2. Clean old builds ========"
 rm -rf $BUILD_DIR $OUTPUT_DIR
-mkdir -p $BUILD_DIR
+mkdir -p $BUILD_DIR/objs
 mkdir -p $OUTPUT_DIR
 
-echo "Removing old object files and bc archives..."
-find ./src -name "*.o" -delete
-rm -f ${CORE_NAME}_libretro_emscripten.bc
-
-echo "======== 2. Building LLVM archive via Makefile.libretro ========"
+echo "======== 3. Build LLVM BC (core) ========"
 emmake make -f Makefile.libretro platform=emscripten clean
 emmake make -f Makefile.libretro platform=emscripten -j8
 
-echo "======== 3. Extracting .bc objects ========"
-mkdir -p $BUILD_DIR/objs
-cd $BUILD_DIR/objs
-emar x ../../${CORE_NAME}_libretro_emscripten.bc
+if [ ! -f "$CORE_BC" ]; then
+  echo "ERROR: $CORE_BC not found!"
+  exit 1
+fi
 
-echo "======== 4. Linking to WASM + JS ========"
-emcc *.o \
-  -O3 \
-  -s MODULARIZE=1 \
-  -s EXPORT_ES6=1 \
-  -s WASM=1 \
-  -s ALLOW_MEMORY_GROWTH=1 \
-  -s FILESYSTEM=1 \
-  -s ASSERTIONS=0 \
-  -s ERROR_ON_UNDEFINED_SYMBOLS=0 \
-  -o ../../$OUTPUT_DIR/${CORE_NAME}_libretro.js
+echo "======== 4. Copy BC into RetroArch linker ========"
+cp "$CORE_BC" "$RETROARCH_DIR/libretro_emscripten.bc"
 
-cd ../../
+echo "======== 5. Link using RetroArch Makefile.emscripten ========"
+cd "$RETROARCH_DIR"
 
-echo "======== 5. Build complete! ========"
-echo "Generated files:"
-echo " - $OUTPUT_DIR/${CORE_NAME}_libretro.js"
-echo " - $OUTPUT_DIR/${CORE_NAME}_libretro.wasm"
-echo ""
-echo "DONE!"
+# Build frontend + wasm core using RetroArch linker
+emmake make -f Makefile.emscripten LIBRETRO=${CORE_NAME} -j all
+
+echo "======== 6. Rename output to remove libretro prefix ========"
+cp ${CORE_NAME}_libretro.js   "../$OUTPUT_DIR/${CORE_NAME}.js"
+cp ${CORE_NAME}_libretro.wasm "../$OUTPUT_DIR/${CORE_NAME}.wasm"
+
+cd ..
+
+echo "======== DONE ========"
+echo "Built:"
+echo "  $OUTPUT_DIR/${CORE_NAME}.js"
+echo "  $OUTPUT_DIR/${CORE_NAME}.wasm"
