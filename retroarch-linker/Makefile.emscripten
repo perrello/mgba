@@ -132,8 +132,8 @@ _cmd_cheat_toggle_index,_cmd_cheat_get_code_state,_cmd_cheat_realloc,_cmd_cheat_
 EmscriptenSendCommand,EmscriptenReceiveCommandReply,\
 _wasm_get_system_ram_ptr,_wasm_get_system_ram_size,\
 _wasm_rcheevos_init,_wasm_rcheevos_load_game,_wasm_rcheevos_do_frame,_wasm_rcheevos_process_server_response,\
-_wasm_link_gba_read,_wasm_link_gba_write,_wasm_link_gba_sio_write,\
-_wasm_link_gb_read,_wasm_link_gb_write
+_wasm_link_gba_read,_wasm_link_gba_write,_wasm_link_gba_sio_write,_wasm_link_gba_send,\
+_wasm_link_gb_read,_wasm_link_gb_write,_wasm_link_gb_send
 
 EXPORTS := callMain,FS,PATH,ERRNO_CODES,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply
 

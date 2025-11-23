@@ -32,6 +32,7 @@
 #endif
 #include <mgba-util/memory.h>
 #include <mgba-util/vfs.h>
+#include "../../core/link_cable.h"
 
 #ifndef __LIBRETRO__
 #error "Can't compile the libretro core as anything other than libretro."
@@ -2687,3 +2688,62 @@ static int32_t _readGyroZ(struct mRotationSource* source) {
 	UNUSED(source);
 	return gyroZ;
 }
+
+#ifdef __EMSCRIPTEN__
+
+//
+// JS → JS CALLBACKS
+//
+EM_JS(void, js_link_session_start, (int system, int playerId), {
+    if (window?.LinkEvents?.onSessionStart)
+        window.LinkEvents.onSessionStart(system, playerId);
+});
+
+EM_JS(void, js_link_write, (int system, int playerId, uint32_t value, int bits), {
+    if (window?.LinkEvents?.onWrite)
+        window.LinkEvents.onWrite(system, playerId, value, bits);
+});
+
+EM_JS(void, js_link_read, (int system, int playerId, uint32_t value, int bits), {
+    if (window?.LinkEvents?.onRead)
+        window.LinkEvents.onRead(system, playerId, value, bits);
+});
+
+
+//
+// C → JS CALLBACK WRAPPERS
+//
+static void lr_link_session_start(int system, int playerId) {
+    js_link_session_start(system, playerId);
+}
+static void lr_link_write(int system, int playerId, uint32_t value, int bits) {
+    js_link_write(system, playerId, value, bits);
+}
+static void lr_link_read(int system, int playerId, uint32_t value, int bits) {
+    js_link_read(system, playerId, value, bits);
+}
+
+//
+// Callback tabel voor de core
+//
+static struct LinkCableCallbacks lr_link_cbs = {
+    .on_session_start = lr_link_session_start,
+    .on_write = lr_link_write,
+    .on_read = lr_link_read
+};
+
+
+//
+// JS → C  (data injectie van andere tab)
+//
+EMSCRIPTEN_KEEPALIVE
+void wasm_link_gba_send(int playerId, uint32_t value, int bits) {
+    gba_link_cable_read(playerId, value, bits);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void wasm_link_gb_send(int playerId, uint32_t value, int bits) {
+    gb_link_cable_read(playerId, value, bits);
+}
+
+#endif // __EMSCRIPTEN__

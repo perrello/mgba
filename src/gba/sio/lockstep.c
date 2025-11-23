@@ -3,10 +3,15 @@
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+#include <stdio.h>     
+#pragma message("Compiling GBA lockstep")
+
 #include <mgba/internal/gba/sio/lockstep.h>
 
 #include <mgba/internal/gba/gba.h>
 #include <mgba/internal/gba/io.h>
+
+#include "core/link_cable.h"
 
 #define DRIVER_ID 0x6B636F4C
 #define DRIVER_STATE_VERSION 1
@@ -513,6 +518,7 @@ static uint16_t GBASIOLockstepDriverWriteRCNT(struct GBASIODriver* driver, uint1
 static bool GBASIOLockstepDriverStart(struct GBASIODriver* driver) {
 	struct GBASIOLockstepDriver* lockstep = (struct GBASIOLockstepDriver*) driver;
 	struct GBASIOLockstepCoordinator* coordinator = lockstep->coordinator;
+	fprintf(stderr, "[GBA LOCKSTEP] DriverStart called (lockstepId=%u)\n", lockstep->lockstepId);
 	bool ret = false;
 	MutexLock(&coordinator->mutex);
 	if (coordinator->transferActive) {
@@ -524,6 +530,12 @@ static bool GBASIOLockstepDriverStart(struct GBASIODriver* driver) {
 		mLOG(GBA_SIO, DEBUG, "Secondary player attempted to start transfer");
 		goto out;
 	}
+	if (player->playerId == 0 && g_link_cable_callbacks.on_session_start) {
+		fprintf(stderr, "[GBA LOCKSTEP] SessionStart callback (player=0)\n");
+		g_link_cable_callbacks.on_session_start(LINK_SYS_GBA, 0);
+	}
+	fprintf(stderr, "[GBA LOCKSTEP] Transfer starting at %08X, mode=%d\n",
+	        coordinator->cycle, player->mode);
 	mLOG(GBA_SIO, DEBUG, "Transfer starting at %08X", coordinator->cycle);
 	memset(coordinator->multiData, 0xFF, sizeof(coordinator->multiData));
 	_setData(coordinator, 0, player->driver->d.p);
@@ -559,6 +571,11 @@ static void GBASIOLockstepDriverFinishMultiplayer(struct GBASIODriver* driver, u
 			     coordinator->multiData[2],
 			     coordinator->multiData[3]);
 			memcpy(data, coordinator->multiData, sizeof(uint16_t) * 4);
+
+			// core LEEST data per speler
+			if (player->playerId >= 0 && player->playerId < 4) {
+				gba_link_cable_on_read(player->playerId, data[player->playerId], 16);
+			}
 		}
 		player->dataReceived = false;
 		if (player->playerId == 0) {
@@ -581,6 +598,9 @@ static uint8_t GBASIOLockstepDriverFinishNormal8(struct GBASIODriver* driver) {
 			} else {
 				data = coordinator->normalData[player->playerId - 1];
 				mLOG(GBA_SIO, INFO, "NORMAL8 transfer finished: %02X", data);
+
+				// core LEEST inkomende byte
+				gba_link_cable_on_read(player->playerId, data, 8);
 			}
 		}
 		player->dataReceived = false;
@@ -605,6 +625,9 @@ static uint32_t GBASIOLockstepDriverFinishNormal32(struct GBASIODriver* driver) 
 			} else {
 				data = coordinator->normalData[player->playerId - 1];
 				mLOG(GBA_SIO, INFO, "NORMAL32 transfer finished: %08X", data);
+
+				// core LEEST inkomende 32-bit
+				gba_link_cable_on_read(player->playerId, data, 32);
 			}
 		}
 		player->dataReceived = false;
@@ -793,26 +816,44 @@ void _reconfigPlayers(struct GBASIOLockstepCoordinator* coordinator) {
 }
 
 static void _setData(struct GBASIOLockstepCoordinator* coordinator, uint32_t id, struct GBASIO* sio) {
+	uint32_t value = 0;
+
 	switch (coordinator->transferMode) {
+
 	case GBA_SIO_MULTI:
-		coordinator->multiData[id] = sio->p->memory.io[GBA_REG(SIOMLT_SEND)];
+		value = sio->p->memory.io[GBA_REG(SIOMLT_SEND)];
+		coordinator->multiData[id] = value;
 		break;
+
 	case GBA_SIO_NORMAL_8:
-		coordinator->normalData[id] = sio->p->memory.io[GBA_REG(SIODATA8)];
+		value = sio->p->memory.io[GBA_REG(SIODATA8)];
+		coordinator->normalData[id] = value;
 		break;
+
 	case GBA_SIO_NORMAL_32:
-		coordinator->normalData[id] = sio->p->memory.io[GBA_REG(SIODATA32_LO)];
-		coordinator->normalData[id] |= sio->p->memory.io[GBA_REG(SIODATA32_HI)] << 16;
+		value = sio->p->memory.io[GBA_REG(SIODATA32_LO)];
+		value |= sio->p->memory.io[GBA_REG(SIODATA32_HI)] << 16;
+		coordinator->normalData[id] = value;
 		break;
+
 	case GBA_SIO_UART:
 	case GBA_SIO_GPIO:
 	case GBA_SIO_JOYBUS:
 		mLOG(GBA_SIO, ERROR, "Unsupported mode %i in lockstep", coordinator->transferMode);
-		// TODO: Should we handle this or just abort?
-		break;
+		return;
 	}
-}
+	int bits = 8;
+	if (coordinator->transferMode == GBA_SIO_NORMAL_32)
+		bits = 32;
+	if (coordinator->transferMode == GBA_SIO_MULTI)
+		bits = 16; 
 
+	fprintf(stderr, "[GBA LOCKSTEP] _setData id=%u mode=%d value=%u bits=%d\n",
+	        id, coordinator->transferMode, value, bits);
+
+	// ==> core schrijft naar link
+	gba_link_cable_on_write((int)id, value, bits);
+}
 void _setReady(struct GBASIOLockstepCoordinator* coordinator, struct GBASIOLockstepPlayer* activePlayer, int playerId, enum GBASIOMode mode) {
 	activePlayer->otherModes[playerId] = mode;
 	bool ready = true;
