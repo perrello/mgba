@@ -4,7 +4,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "libretro.h"
+
+#ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
+#endif
 
 #include <mgba-util/common.h>
 
@@ -13,6 +16,8 @@
 #include <mgba/core/log.h>
 #include <mgba/core/serialize.h>
 #include <mgba/core/version.h>
+#include <mgba/core/core.h>
+#include <mgba/core/lockstep.h>
 #include <mgba-util/audio-buffer.h>
 #include <mgba-util/audio-resampler.h>
 #ifdef M_CORE_GB
@@ -22,6 +27,7 @@
 #include <mgba/internal/gb/gb.h>
 #include <mgba/internal/gb/mbc.h>
 #include <mgba/internal/gb/overrides.h>
+#include <mgba/internal/gb/sio/lockstep.h>
 #endif
 #ifdef M_CORE_GBA
 #include <mgba/gba/core.h>
@@ -29,6 +35,7 @@
 #include <mgba/internal/gba/sio.h>
 #include <mgba/gba/interface.h>
 #include <mgba/internal/gba/gba.h>
+#include <mgba/internal/gba/sio/lockstep.h>
 #endif
 #include <mgba-util/memory.h>
 #include <mgba-util/vfs.h>
@@ -89,8 +96,10 @@ static int32_t _readTiltX(struct mRotationSource* source);
 static int32_t _readTiltY(struct mRotationSource* source);
 static int32_t _readGyroZ(struct mRotationSource* source);
 static void _setupMaps(struct mCore* core);
+static void initLockStep(void);
 
 static struct mCore* core;
+static struct mCore* headlessCore;
 static mColor* outputBuffer = NULL;
 struct mAudioBuffer audioResampleBuffer;
 struct mAudioResampler audioResampler;
@@ -99,7 +108,10 @@ static size_t audioSampleBufferSize;
 static void* data;
 static size_t dataSize;
 static void* savedata;
+
 static struct mAVStream stream;
+static struct mAVStream stream2;
+
 static bool sensorsInitDone;
 static bool rumbleInitDone;
 static struct mRumbleIntegrator rumble;
@@ -159,6 +171,19 @@ static const int keymap[] = {
 #endif
 const char* const projectVersion = "0.11-dev" GIT_VERSION;
 const char* const projectName = "mGBA";
+
+#ifdef M_CORE_GB
+static struct GBSIOLockstep gb_lockstep;
+static struct GBSIOLockstepNode gb_nodes[2];
+
+typedef struct {
+    int32_t cyclesPosted[2];
+    unsigned waitMask;
+} LibretroLockstepCtx;
+
+static LibretroLockstepCtx gb_ls_ctx;
+static struct mLockstep gb_ls_mlock;  
+#endif
 
 /* Maximum number of consecutive frames that
  * can be skipped */
@@ -1254,10 +1279,13 @@ static void _reloadSettings(void) {
 	if (environCallback(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
 		if (strcmp(var.value, "Don't Remove") == 0) {
 			mCoreConfigSetDefaultValue(&core->config, "idleOptimization", "ignore");
+			mCoreConfigSetDefaultValue(&headlessCore->config, "idleOptimization", "ignore"); //TODO
 		} else if (strcmp(var.value, "Remove Known") == 0) {
 			mCoreConfigSetDefaultValue(&core->config, "idleOptimization", "remove");
+			mCoreConfigSetDefaultValue(&headlessCore->config, "idleOptimization", "remove");//TODO
 		} else if (strcmp(var.value, "Detect and Remove") == 0) {
-			mCoreConfigSetDefaultValue(&core->config, "idleOptimization", "detect");
+			mCoreConfigSetDefaultValue(&headlessCore->config, "idleOptimization", "detect");
+			mCoreConfigSetDefaultValue(&headlessCore->config, "idleOptimization", "detect");//TODO
 		}
 	}
 
@@ -1284,11 +1312,17 @@ static void _doDeferredSetup(void) {
     core->reset(core);
 	_setupMaps(core);
 
+	headlessCore->reset(headlessCore);//TODO
+	_setupMaps(headlessCore);
+
 #if defined(COLOR_16_BIT) && defined(COLOR_5_6_5)
 	_loadPostProcessingSettings();
 #endif
 
 	if (!core->loadSave(core, save)) {
+		save->close(save);
+	}
+	if (!headlessCore->loadSave(headlessCore, save)) {
 		save->close(save);
 	}
 	deferredSetup = false;
@@ -1461,6 +1495,9 @@ void retro_init(void) {
 	stream.postAudioBuffer = NULL;
 	stream.postVideoFrame = NULL;
 	stream.audioRateChanged = _audioRateChanged;
+
+	stream2.videoDimensionsChanged = 0;
+	stream2.postVideoFrame = 0;
 
 	imageSource.startRequestImage = _startImage;
 	imageSource.stopRequestImage = _stopImage;
@@ -1688,9 +1725,19 @@ void retro_run(void) {
       updateAudioLatency = false;
    }
 
+    // core->runLoop(core);
+	// headlessCore->runLoop(headlessCore);
+
 	core->runFrame(core);
+	headlessCore->runFrame(headlessCore); //NOT SURE IF NEEDED OR NOT.. DOES FREEZE UP, MAYBE BECAUSE HEADLESS?
+
+	struct GB* gb0 = (struct GB*) core->board;
+	struct GB* gb1 = (struct GB*) headlessCore->board;
+	// printf("[FRAME] fc0=%u fc1=%u\n", gb0->video.frameCounter, gb1->video.frameCounter);
+
 	unsigned width, height;
 	core->currentVideoSize(core, &width, &height);
+	headlessCore->currentVideoSize(headlessCore, 0, 0);
 
 	/* If using 'Fixed Interval' frameskipping, check
 	 * whether a frame is currently available  */
@@ -1954,8 +2001,12 @@ static void _setupMaps(struct mCore* core) {
 
 void retro_reset(void) {
 	core->reset(core);
+	headlessCore->reset(headlessCore);
+
 	mRumbleIntegratorReset(&rumble);
+
 	_setupMaps(core);
+	_setupMaps(headlessCore);
 }
 
 #ifdef GEKKO
@@ -2023,13 +2074,28 @@ bool retro_load_game(const struct retro_game_info* game) {
 	}
 
 	core = mCoreFindVF(rom);
+	headlessCore = mCoreFindVF(rom);
+
 	if (!core) {
 		rom->close(rom);
 		mappedMemoryFree(data, game->size);
 		return false;
 	}
 	mCoreInitConfig(core, NULL);
+	mCoreInitConfig(headlessCore, NULL); //TODO not sure if we need this for the headless core
+
 	core->init(core);
+	headlessCore->init(headlessCore);
+
+	#ifdef __EMSCRIPTEN__
+    emscripten_log(EM_LOG_CONSOLE, "[INIT] cores[0] board = %p\n", core->board);
+    emscripten_log(EM_LOG_CONSOLE, "[INIT] cores[1] board = %p\n", headlessCore->board);
+	#endif
+
+	printf("[INIT] cores[0] board = %p\n", core->board);
+	printf("[INIT] cores[1] board = %p\n", headlessCore->board);
+
+	initLockStep();
 
 #ifdef _3DS
 	outputBuffer = linearMemAlign(VIDEO_BUFF_SIZE, 0x80);
@@ -2037,7 +2103,9 @@ bool retro_load_game(const struct retro_game_info* game) {
 	outputBuffer = malloc(VIDEO_BUFF_SIZE);
 #endif
 	memset(outputBuffer, 0xFFFF, VIDEO_BUFF_SIZE);
+
 	core->setVideoBuffer(core, outputBuffer, VIDEO_WIDTH_MAX);
+	headlessCore->setVideoBuffer(headlessCore, NULL, 0);//(uint8_t*)outputBuffer + BYTES_PER_PIXEL * VIDEO_HORIZONTAL_PIXELS, 512); TODO
 
 #ifdef M_CORE_GBA
 	/* GBA emulation produces a fairly regular number
@@ -2083,6 +2151,8 @@ bool retro_load_game(const struct retro_game_info* game) {
 	}
 
 	core->setAVStream(core, &stream);
+	headlessCore->setAVStream(headlessCore, &stream2);
+
 	core->setPeripheral(core, mPERIPH_RUMBLE, &rumble);
 	core->setPeripheral(core, mPERIPH_ROTATION, &rotation);
 
@@ -2090,7 +2160,10 @@ bool retro_load_game(const struct retro_game_info* game) {
 	memset(savedata, 0xFF, GBA_SIZE_FLASH1M);
 
 	_reloadSettings();
+
 	core->loadROM(core, rom);
+	headlessCore->loadROM(headlessCore, rom);
+
 	deferredSetup = true;
 
 	const char* sysDir = 0;
@@ -2118,11 +2191,14 @@ bool retro_load_game(const struct retro_game_info* game) {
 
 		const char* modelName = mCoreConfigGetValue(&core->config, "gb.model");
 		struct GB* gb = core->board;
+		struct GB* headlessGB = headlessCore->board;
 
 		if (modelName) {
 			gb->model = GBNameToModel(modelName);
+			headlessGB->model = GBNameToModel(modelName);
 		} else {
 			GBDetectModel(gb);
+			GBDetectModel(headlessGB);
 		}
 
 		switch (gb->model) {
@@ -2148,6 +2224,7 @@ bool retro_load_game(const struct retro_game_info* game) {
 		struct VFile* bios = VFileOpen(biosPath, O_RDONLY);
 		if (bios) {
 			core->loadBIOS(core, bios, 0);
+			headlessCore->loadBIOS(headlessCore, bios, 0);
 		}
 	}
 #endif
@@ -2156,13 +2233,18 @@ bool retro_load_game(const struct retro_game_info* game) {
 }
 
 void retro_unload_game(void) {
-	if (!core) {
+	if (!core && !headlessCore) {
 		return;
 	}
 	mCoreConfigDeinit(&core->config);
 	core->deinit(core);
+
+	mCoreConfigDeinit(&headlessCore->config);
+	headlessCore->deinit(headlessCore);
+
 	mappedMemoryFree(data, dataSize);
 	data = 0;
+
 	mappedMemoryFree(savedata, GBA_SIZE_FLASH1M);
 	savedata = 0;
 }
@@ -2448,7 +2530,7 @@ void wasm_link_gb_write(uint32_t address, uint8_t value) {
 #endif // __EMSCRIPTEN__
 
 EMSCRIPTEN_KEEPALIVE
-uint8_t* wasm_get_system_ram_ptr() {
+uint8_t* wasm_get_system_ram_ptr() { //TODO is this something we can work with on the front end side?
     return (uint8_t*)retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
 }
 
@@ -2686,4 +2768,109 @@ static int32_t _readTiltY(struct mRotationSource* source) {
 static int32_t _readGyroZ(struct mRotationSource* source) {
 	UNUSED(source);
 	return gyroZ;
+}
+
+
+#ifdef M_CORE_GB
+static void gb_ls_lock(struct mLockstep* ls) {
+    // single-thread wasm: nothing to do here.. right?
+}
+
+static void gb_ls_unlock(struct mLockstep* ls) {
+	// no unlock because.. no lock
+}
+
+static bool gb_ls_signal(struct mLockstep* ls, unsigned mask) {
+    LibretroLockstepCtx* ctx = (LibretroLockstepCtx*) ls->context;
+    ctx->waitMask &= ~mask;
+    return true; // we "wekken" nooit echt threads, maar dit voorkomt aborts
+}
+
+static bool gb_ls_wait(struct mLockstep* ls, unsigned mask) {
+    LibretroLockstepCtx* ctx = (LibretroLockstepCtx*) ls->context;
+    ctx->waitMask |= mask;
+    // In Qt zou je hier mCoreThreadWaitFromThread doen.
+    // In wasm heb je geen blocking: we geven gewoon terug dat we "geslapen" hebben.
+    return true;
+}
+
+static void gb_ls_addCycles(struct mLockstep* ls, int id, int32_t cycles) {
+    LibretroLockstepCtx* ctx = (LibretroLockstepCtx*) ls->context;
+    if (cycles < 0) {
+        return; // of abort()
+    }
+    ctx->cyclesPosted[id] += cycles;
+#ifdef __EMSCRIPTEN__
+    // logging naar JS
+    emscripten_log(EM_LOG_CONSOLE, "[GB LS] addCycles id=%d cycles=%d total=%d",
+                   id, cycles, ctx->cyclesPosted[id]);
+#endif
+}
+
+static int32_t gb_ls_useCycles(struct mLockstep* ls, int id, int32_t cycles) {
+    LibretroLockstepCtx* ctx = (LibretroLockstepCtx*) ls->context;
+    ctx->cyclesPosted[id] -= cycles;
+    return ctx->cyclesPosted[id];
+}
+
+static int32_t gb_ls_unusedCycles(struct mLockstep* ls, int id) {
+    LibretroLockstepCtx* ctx = (LibretroLockstepCtx*) ls->context;
+    return ctx->cyclesPosted[id];
+}
+
+static void gb_ls_unload(struct mLockstep* ls, int id) {
+    LibretroLockstepCtx* ctx = (LibretroLockstepCtx*) ls->context;
+    ctx->cyclesPosted[id] = 0;
+    ctx->waitMask &= ~(1u << id);
+}
+#endif
+
+static void initLockStep() { 
+	#ifdef __EMSCRIPTEN__
+    emscripten_log(EM_LOG_CONSOLE, "initLockStep!");
+	#endif
+	printf("INIT LOCKSTEP");
+
+	#ifdef M_CORE_GB
+	if (core->platform(core) == mPLATFORM_GB) {
+		// 1) Init lockstep backend
+		GBSIOLockstepInit(&gb_lockstep);
+
+		// 2) Init mLockstep "d" + callbacks
+		memset(&gb_ls_ctx, 0, sizeof(gb_ls_ctx));
+		mLockstepInit(&gb_ls_mlock);
+		gb_ls_mlock.context   = &gb_ls_ctx;
+		gb_ls_mlock.lock      = gb_ls_lock;
+		gb_ls_mlock.unlock    = gb_ls_unlock;
+		gb_ls_mlock.signal    = gb_ls_signal;
+		gb_ls_mlock.wait      = gb_ls_wait;
+		gb_ls_mlock.addCycles = gb_ls_addCycles;
+		gb_ls_mlock.useCycles = gb_ls_useCycles;
+		gb_ls_mlock.unusedCycles = gb_ls_unusedCycles;
+		gb_ls_mlock.unload    = gb_ls_unload;
+
+		// GBSIOLockstep verwacht dat lockstep->d hiernaar wijst
+		gb_lockstep.d = gb_ls_mlock; // afhankelijk van definitie kan dit anders heten
+
+		// 3) Twee nodes aanmaken en attachen
+		GBSIOLockstepNodeCreate(&gb_nodes[0]);
+		GBSIOLockstepNodeCreate(&gb_nodes[1]);
+
+		GBSIOLockstepAttachNode(&gb_lockstep, &gb_nodes[0]);
+		GBSIOLockstepAttachNode(&gb_lockstep, &gb_nodes[1]);
+
+		// 4) Nodes als SIO driver aan beide GB cores hangen
+		struct GB* gb0 = (struct GB*) core->board;
+		struct GB* gb1 = (struct GB*) headlessCore->board;
+
+		printf("[INIT LS] core0 sio driver = %p\n", gb0->sio.driver);
+		printf("[INIT LS] core1 sio driver = %p\n", gb1->sio.driver);
+
+		GBSIOSetDriver(&gb0->sio, &gb_nodes[0].d);
+		GBSIOSetDriver(&gb1->sio, &gb_nodes[1].d);
+
+		printf("[INIT LS] core0 sio driver = %p\n", gb0->sio.driver);
+		printf("[INIT LS] core1 sio driver = %p\n", gb1->sio.driver);
+	}
+	#endif
 }

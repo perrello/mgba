@@ -248,6 +248,7 @@ static_assert(sizeof(((struct GBACore*) 0)->memoryBlocks) >=
 
 static bool _GBACoreInit(struct mCore* core) {
 	struct GBACore* gbacore = (struct GBACore*) core;
+	printf("Core init!");
 
 	struct ARMCore* cpu = anonymousMemoryMap(sizeof(struct ARMCore));
 	struct GBA* gba = anonymousMemoryMap(sizeof(struct GBA));
