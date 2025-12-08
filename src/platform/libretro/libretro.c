@@ -17,16 +17,12 @@
 #include <mgba-util/audio-resampler.h>
 #ifdef M_CORE_GB
 #include <mgba/gb/core.h>
-#include <mgba/internal/gb/io.h>
-#include <mgba/internal/gb/sio.h>
 #include <mgba/internal/gb/gb.h>
 #include <mgba/internal/gb/mbc.h>
 #include <mgba/internal/gb/overrides.h>
 #endif
 #ifdef M_CORE_GBA
 #include <mgba/gba/core.h>
-#include <mgba/internal/gba/io.h>
-#include <mgba/internal/gba/sio.h>
 #include <mgba/gba/interface.h>
 #include <mgba/internal/gba/gba.h>
 #endif
@@ -2383,69 +2379,6 @@ size_t retro_get_memory_size(unsigned id) {
 	}
 	return 0;
 }
-
-#ifdef __EMSCRIPTEN__
-
-#ifdef M_CORE_GBA
-// ------------------------------
-// GBA LINK BRIDGE (geen pointer in JS)
-// ------------------------------
-
-EMSCRIPTEN_KEEPALIVE
-uint16_t wasm_link_gba_read(uint32_t address) {
-    if (!core) return 0xFFFF;
-    if (core->platform(core) != mPLATFORM_GBA) return 0xFFFF;
-
-    struct GBA* gba = (struct GBA*) core->board;
-    return GBAIORead(gba, address);
-}
-
-EMSCRIPTEN_KEEPALIVE
-void wasm_link_gba_write(uint32_t address, uint16_t value) {
-    if (!core) return;
-    if (core->platform(core) != mPLATFORM_GBA) return;
-
-    struct GBA* gba = (struct GBA*) core->board;
-    GBAIOWrite(gba, address, value);
-}
-
-EMSCRIPTEN_KEEPALIVE
-uint16_t wasm_link_gba_sio_write(uint32_t address, uint16_t value) {
-    if (!core) return 0xFFFF;
-    if (core->platform(core) != mPLATFORM_GBA) return 0xFFFF;
-
-    struct GBA* gba = (struct GBA*) core->board;
-    struct GBASIO* sio = &gba->sio;
-    return GBASIOWriteRegister(sio, address, value);
-}
-#endif // M_CORE_GBA
-
-
-#ifdef M_CORE_GB
-// ------------------------------
-// GB / GBC LINK BRIDGE
-// ------------------------------
-
-EMSCRIPTEN_KEEPALIVE
-uint8_t wasm_link_gb_read(uint32_t address) {
-    if (!core) return 0xFF;
-    if (core->platform(core) != mPLATFORM_GB) return 0xFF;
-
-    struct GB* gb = (struct GB*) core->board;
-    return GBIORead(gb, address);
-}
-
-EMSCRIPTEN_KEEPALIVE
-void wasm_link_gb_write(uint32_t address, uint8_t value) {
-    if (!core) return;
-    if (core->platform(core) != mPLATFORM_GB) return;
-
-    struct GB* gb = (struct GB*) core->board;
-    GBIOWrite(gb, address, value);
-}
-#endif // M_CORE_GB
-
-#endif // __EMSCRIPTEN__
 
 EMSCRIPTEN_KEEPALIVE
 uint8_t* wasm_get_system_ram_ptr() {
