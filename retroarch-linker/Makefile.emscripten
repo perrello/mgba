@@ -131,7 +131,7 @@ _cmd_cheat_toggle_index,_cmd_cheat_get_code_state,_cmd_cheat_realloc,_cmd_cheat_
 _cmd_cheat_apply_cheats,\
 EmscriptenSendCommand,EmscriptenReceiveCommandReply,\
 _wasm_get_system_ram_ptr,_wasm_get_system_ram_size,\
-_mgba_link_gb_read,_mgba_link_gb_write,_mgba_link_gb_get_seq,\
+_mgba_link_gb_read,_mgba_link_gb_write,_mgba_link_gb_get_seq,_mgba_link_gb_exchange,\
 _mgba_link_gba_read,_mgba_link_gba_write,_mgba_link_gba_set_id,\
 _mgba_link_gba_read_normal32,_mgba_link_gba_write_normal32,\
 _mgba_get_gb_model

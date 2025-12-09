@@ -2441,7 +2441,8 @@ static void GBWasmLinkDeinit(struct GBSIODriver* driver) {
 
 static void GBWasmLinkWriteSB(struct GBSIODriver* driver, uint8_t value) {
 	UNUSED(driver);
-	/* Bewaar de huidige SB; we markeren een "nieuwe byte" pas bij start van een transfer. */
+	/* Bewaar de huidige SB; de bijbehorende transfer start pas wanneer
+	 * het enable‑bit in SC van 0 -> 1 gaat. */
 	g_gbWasmLinkCurrentSB = value;
 }
 
@@ -2500,6 +2501,41 @@ void mgba_link_gb_write(uint8_t value) {
 	gb->memory.io[GB_REG_SC] = GBRegisterSCClearEnable(gb->memory.io[GB_REG_SC]);
 	gb->memory.io[GB_REG_IF] |= (1 << GB_IRQ_SIO);
 	GBUpdateIRQs(gb);
+	/* Houd driver‑state in sync met SC, zodat we de volgende rising edge
+	 * van het enable‑bit weer correct detecteren. */
+	g_gbWasmLinkLastSC = gb->memory.io[GB_REG_SC];
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint8_t mgba_link_gb_exchange(uint8_t value) {
+	g_gbWasmLinkNextRx = value;
+	g_gbWasmLinkHasRx = true;
+
+	if (!core) {
+		return 0xFF;
+	}
+	if (core->platform(core) != mPLATFORM_GB) {
+		return 0xFF;
+	}
+
+	struct GB* gb = core->board;
+	if (!gb) {
+		return 0xFF;
+	}
+	if (gb->sio.driver != &g_gbWasmLinkDriver) {
+		return 0xFF;
+	}
+
+	/* Dit is de byte die deze GB zelf verstuurt bij deze transfer. */
+	uint8_t myTx = g_gbWasmLinkCurrentSB;
+
+	/* Remote byte de core in duwen en de transfer afronden. */
+	gb->memory.io[GB_REG_SB] = value;
+	gb->memory.io[GB_REG_SC] = GBRegisterSCClearEnable(gb->memory.io[GB_REG_SC]);
+	gb->memory.io[GB_REG_IF] |= (1 << GB_IRQ_SIO);
+	GBUpdateIRQs(gb);
+
+	return myTx;
 }
 
 EMSCRIPTEN_KEEPALIVE
