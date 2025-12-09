@@ -2507,6 +2507,21 @@ uint32_t mgba_link_gb_get_seq(void) {
 	return g_gbWasmLinkSeq;
 }
 
+EMSCRIPTEN_KEEPALIVE
+int mgba_get_gb_model(void) {
+	if (!core) {
+		return -1;
+	}
+	if (core->platform(core) != mPLATFORM_GB) {
+		return -1;
+	}
+	struct GB* gb = core->board;
+	if (!gb) {
+		return -1;
+	}
+	return gb->model;
+}
+
 #endif /* M_CORE_GB */
 
 #ifdef M_CORE_GBA
@@ -2590,12 +2605,15 @@ static bool GBAWasmLinkStart(struct GBASIODriver* driver) {
 	case GBA_SIO_MULTI:
 		/* Capture the word this GBA is sending for this MULTI transfer. */
 		g_gbaWasmLinkLastTx = sio->p->memory.io[GBA_REG(SIOMLT_SEND)];
-		break;
+		/* Gebruik de standaard timing voor MULTI, zodat finishMultiplayer
+		 * via het normale SIO-pad wordt aangeroepen. */
+		return true;
 	case GBA_SIO_NORMAL_32: {
 		uint16_t lo = sio->p->memory.io[GBA_REG(SIODATA32_LO)];
 		uint16_t hi = sio->p->memory.io[GBA_REG(SIODATA32_HI)];
 		g_gbaWasmLinkLastTx32 = (uint32_t) lo | ((uint32_t) hi << 16);
-		break;
+		/* Laat SIO weten dat de driver zelf de transfer afhandelt */
+		return false;
 	}
 	default:
 		break;
@@ -2670,6 +2688,25 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_link_gba_write_normal32(uint32_t value) {
 	g_gbaWasmLinkNextRx32 = value;
 	g_gbaWasmLinkHasRx32 = true;
+
+	if (!core) {
+		return;
+	}
+	if (core->platform(core) != mPLATFORM_GBA) {
+		return;
+	}
+
+	struct GBA* gba = core->board;
+	if (!gba) {
+		return;
+	}
+	if (gba->sio.driver != &g_gbaWasmLinkDriver) {
+		return;
+	}
+
+	/* Voltooi de NORMAL_32-transfer direct: schrijf data naar registers en
+	 * handel de IRQ af via het bestaande helperpad. */
+	GBASIONormal32FinishTransfer(&gba->sio, value, 0);
 }
 
 EMSCRIPTEN_KEEPALIVE
