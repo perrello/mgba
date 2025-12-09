@@ -18,13 +18,17 @@
 #ifdef M_CORE_GB
 #include <mgba/gb/core.h>
 #include <mgba/internal/gb/gb.h>
+#include <mgba/internal/gb/io.h>
 #include <mgba/internal/gb/mbc.h>
 #include <mgba/internal/gb/overrides.h>
+#include <mgba/internal/gb/sio.h>
 #endif
 #ifdef M_CORE_GBA
 #include <mgba/gba/core.h>
 #include <mgba/gba/interface.h>
 #include <mgba/internal/gba/gba.h>
+#include <mgba/internal/gba/io.h>
+#include <mgba/internal/gba/sio.h>
 #endif
 #include <mgba-util/memory.h>
 #include <mgba-util/vfs.h>
@@ -85,6 +89,16 @@ static int32_t _readTiltX(struct mRotationSource* source);
 static int32_t _readTiltY(struct mRotationSource* source);
 static int32_t _readGyroZ(struct mRotationSource* source);
 static void _setupMaps(struct mCore* core);
+
+#ifdef M_CORE_GB
+extern struct GBSIODriver g_gbWasmLinkDriver;
+static void GBWasmLinkDriverInit(void);
+#endif
+
+#ifdef M_CORE_GBA
+extern struct GBASIODriver g_gbaWasmLinkDriver;
+static void GBAWasmLinkDriverInit(void);
+#endif
 
 static struct mCore* core;
 static mColor* outputBuffer = NULL;
@@ -1989,6 +2003,10 @@ error:
 }
 #endif
 
+#ifdef M_CORE_GB
+static void GBWasmLinkDriverInit(void);
+#endif
+
 bool retro_load_game(const struct retro_game_info* game) {
 	struct VFile* rom;
 
@@ -2097,6 +2115,8 @@ bool retro_load_game(const struct retro_game_info* game) {
 #ifdef M_CORE_GBA
 	if (core->platform(core) == mPLATFORM_GBA) {
 		core->setPeripheral(core, mPERIPH_GBA_LUMINANCE, &lux);
+		GBAWasmLinkDriverInit();
+		core->setPeripheral(core, mPERIPH_GBA_LINK_PORT, &g_gbaWasmLinkDriver);
 		biosName = "gba_bios.bin";
 	}
 #endif
@@ -2120,6 +2140,10 @@ bool retro_load_game(const struct retro_game_info* game) {
 		} else {
 			GBDetectModel(gb);
 		}
+
+		/* Attach WASM link driver so JS can bridge GB serial */
+		GBWasmLinkDriverInit();
+		GBSIOSetDriver(&gb->sio, &g_gbWasmLinkDriver);
 
 		switch (gb->model) {
 		case GB_MODEL_AGB:
@@ -2389,6 +2413,276 @@ EMSCRIPTEN_KEEPALIVE
 int wasm_get_system_ram_size() {
     return retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM);
 }
+
+#ifdef M_CORE_GB
+
+static uint8_t g_gbWasmLinkLastTx;
+static uint8_t g_gbWasmLinkNextRx;
+static bool g_gbWasmLinkHasRx;
+static uint8_t g_gbWasmLinkCurrentSB;
+static uint8_t g_gbWasmLinkLastSC;
+static uint32_t g_gbWasmLinkSeq;
+struct GBSIODriver g_gbWasmLinkDriver;
+
+static bool GBWasmLinkInit(struct GBSIODriver* driver) {
+	UNUSED(driver);
+	g_gbWasmLinkLastTx = 0xFF;
+	g_gbWasmLinkNextRx = 0xFF;
+	g_gbWasmLinkHasRx = false;
+	g_gbWasmLinkCurrentSB = 0xFF;
+	g_gbWasmLinkLastSC = 0;
+	g_gbWasmLinkSeq = 0;
+	return true;
+}
+
+static void GBWasmLinkDeinit(struct GBSIODriver* driver) {
+	UNUSED(driver);
+}
+
+static void GBWasmLinkWriteSB(struct GBSIODriver* driver, uint8_t value) {
+	UNUSED(driver);
+	/* Bewaar de huidige SB; we markeren een "nieuwe byte" pas bij start van een transfer. */
+	g_gbWasmLinkCurrentSB = value;
+}
+
+static uint8_t GBWasmLinkWriteSC(struct GBSIODriver* driver, uint8_t value) {
+	/* Nieuwe transfer start wanneer enable-bit (7) van 0 -> 1 gaat, ongeacht clock-source. */
+	if ((value & 0x80) && !(g_gbWasmLinkLastSC & 0x80)) {
+		/* Capture TX-byte voor JS-bridge. */
+		g_gbWasmLinkLastTx = g_gbWasmLinkCurrentSB;
+		++g_gbWasmLinkSeq;
+		/* Neem controle over de timing: schakel de standaard
+		 * bit‑shift events uit. De transfer wordt voltooid wanneer JS
+		 * via mgba_link_gb_write() de remote byte doorgeeft. */
+		if (driver->p && driver->p->p) {
+			mTimingDeschedule(&driver->p->p->timing, &driver->p->event);
+			driver->p->remainingBits = 0;
+		}
+	}
+	g_gbWasmLinkLastSC = value;
+	return value;
+}
+
+static void GBWasmLinkDriverInit(void) {
+	memset(&g_gbWasmLinkDriver, 0, sizeof(g_gbWasmLinkDriver));
+	g_gbWasmLinkDriver.init = GBWasmLinkInit;
+	g_gbWasmLinkDriver.deinit = GBWasmLinkDeinit;
+	g_gbWasmLinkDriver.writeSB = GBWasmLinkWriteSB;
+	g_gbWasmLinkDriver.writeSC = GBWasmLinkWriteSC;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint8_t mgba_link_gb_read(void) {
+	return g_gbWasmLinkLastTx;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void mgba_link_gb_write(uint8_t value) {
+	g_gbWasmLinkNextRx = value;
+	g_gbWasmLinkHasRx = true;
+
+	if (!core) {
+		return;
+	}
+	if (core->platform(core) != mPLATFORM_GB) {
+		return;
+	}
+
+	struct GB* gb = core->board;
+	if (!gb) {
+		return;
+	}
+	if (gb->sio.driver != &g_gbWasmLinkDriver) {
+		return;
+	}
+
+	gb->memory.io[GB_REG_SB] = value;
+	gb->memory.io[GB_REG_SC] = GBRegisterSCClearEnable(gb->memory.io[GB_REG_SC]);
+	gb->memory.io[GB_REG_IF] |= (1 << GB_IRQ_SIO);
+	GBUpdateIRQs(gb);
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t mgba_link_gb_get_seq(void) {
+	return g_gbWasmLinkSeq;
+}
+
+#endif /* M_CORE_GB */
+
+#ifdef M_CORE_GBA
+
+static uint16_t g_gbaWasmLinkLastTx;
+static uint16_t g_gbaWasmLinkNextRx;
+static bool g_gbaWasmLinkHasRx;
+static uint32_t g_gbaWasmLinkLastTx32;
+static uint32_t g_gbaWasmLinkNextRx32;
+static bool g_gbaWasmLinkHasRx32;
+static int g_gbaWasmLinkId;
+struct GBASIODriver g_gbaWasmLinkDriver;
+
+static bool GBAWasmLinkInit(struct GBASIODriver* driver) {
+	UNUSED(driver);
+	g_gbaWasmLinkLastTx = 0xFFFF;
+	g_gbaWasmLinkNextRx = 0xFFFF;
+	g_gbaWasmLinkHasRx = false;
+	g_gbaWasmLinkLastTx32 = 0xFFFFFFFFu;
+	g_gbaWasmLinkNextRx32 = 0xFFFFFFFFu;
+	g_gbaWasmLinkHasRx32 = false;
+	if (g_gbaWasmLinkId < 0 || g_gbaWasmLinkId > 3) {
+		g_gbaWasmLinkId = 0;
+	}
+	return true;
+}
+
+static void GBAWasmLinkDeinit(struct GBASIODriver* driver) {
+	UNUSED(driver);
+}
+
+static void GBAWasmLinkReset(struct GBASIODriver* driver) {
+	UNUSED(driver);
+	g_gbaWasmLinkLastTx = 0xFFFF;
+	g_gbaWasmLinkNextRx = 0xFFFF;
+	g_gbaWasmLinkHasRx = false;
+	g_gbaWasmLinkLastTx32 = 0xFFFFFFFFu;
+	g_gbaWasmLinkNextRx32 = 0xFFFFFFFFu;
+	g_gbaWasmLinkHasRx32 = false;
+}
+
+static uint32_t GBAWasmLinkDriverId(const struct GBASIODriver* driver) {
+	UNUSED(driver);
+	/* Arbitrary magic to identify the driver in savestates */
+	return 0x574C4742; /* 'WLGb' */
+}
+
+static bool GBAWasmLinkHandlesMode(struct GBASIODriver* driver, enum GBASIOMode mode) {
+	UNUSED(driver);
+	return mode == GBA_SIO_MULTI || mode == GBA_SIO_NORMAL_32;
+}
+
+static int GBAWasmLinkConnectedDevices(struct GBASIODriver* driver) {
+	UNUSED(driver);
+	/* One other GBA on the link cable (2-player link) */
+	return 1;
+}
+
+static int GBAWasmLinkDeviceId(struct GBASIODriver* driver) {
+	UNUSED(driver);
+	return g_gbaWasmLinkId;
+}
+
+static uint16_t GBAWasmLinkWriteSIOCNT(struct GBASIODriver* driver, uint16_t value) {
+	UNUSED(driver);
+	/* Don't modify SIOCNT, just pass it through. */
+	return value;
+}
+
+static uint16_t GBAWasmLinkWriteRCNT(struct GBASIODriver* driver, uint16_t value) {
+	UNUSED(driver);
+	return value;
+}
+
+static bool GBAWasmLinkStart(struct GBASIODriver* driver) {
+	struct GBASIO* sio = driver->p;
+	if (!sio) {
+		return true;
+	}
+	switch (sio->mode) {
+	case GBA_SIO_MULTI:
+		/* Capture the word this GBA is sending for this MULTI transfer. */
+		g_gbaWasmLinkLastTx = sio->p->memory.io[GBA_REG(SIOMLT_SEND)];
+		break;
+	case GBA_SIO_NORMAL_32: {
+		uint16_t lo = sio->p->memory.io[GBA_REG(SIODATA32_LO)];
+		uint16_t hi = sio->p->memory.io[GBA_REG(SIODATA32_HI)];
+		g_gbaWasmLinkLastTx32 = (uint32_t) lo | ((uint32_t) hi << 16);
+		break;
+	}
+	default:
+		break;
+	}
+	return true;
+}
+
+static void GBAWasmLinkFinishMultiplayer(struct GBASIODriver* driver, uint16_t data[4]) {
+	struct GBASIO* sio = driver->p;
+	UNUSED(sio);
+
+	uint16_t tx = g_gbaWasmLinkLastTx;
+	uint16_t rx = 0xFFFF;
+	if (g_gbaWasmLinkHasRx) {
+		rx = g_gbaWasmLinkNextRx;
+		g_gbaWasmLinkHasRx = false;
+	}
+
+	/* Two-player link: fill slots 0 and 1, others left as 0xFFFF. */
+	data[0] = tx;
+	data[1] = rx;
+	data[2] = 0xFFFF;
+	data[3] = 0xFFFF;
+}
+
+static uint32_t GBAWasmLinkFinishNormal32(struct GBASIODriver* driver) {
+	struct GBASIO* sio = driver->p;
+	UNUSED(sio);
+
+	uint32_t rx = 0xFFFFFFFFu;
+	if (g_gbaWasmLinkHasRx32) {
+		rx = g_gbaWasmLinkNextRx32;
+		g_gbaWasmLinkHasRx32 = false;
+	}
+	return rx;
+}
+
+static void GBAWasmLinkDriverInit(void) {
+	memset(&g_gbaWasmLinkDriver, 0, sizeof(g_gbaWasmLinkDriver));
+	g_gbaWasmLinkDriver.init = GBAWasmLinkInit;
+	g_gbaWasmLinkDriver.deinit = GBAWasmLinkDeinit;
+	g_gbaWasmLinkDriver.reset = GBAWasmLinkReset;
+	g_gbaWasmLinkDriver.driverId = GBAWasmLinkDriverId;
+	g_gbaWasmLinkDriver.setMode = NULL;
+	g_gbaWasmLinkDriver.handlesMode = GBAWasmLinkHandlesMode;
+	g_gbaWasmLinkDriver.connectedDevices = GBAWasmLinkConnectedDevices;
+	g_gbaWasmLinkDriver.deviceId = GBAWasmLinkDeviceId;
+	g_gbaWasmLinkDriver.writeSIOCNT = GBAWasmLinkWriteSIOCNT;
+	g_gbaWasmLinkDriver.writeRCNT = GBAWasmLinkWriteRCNT;
+	g_gbaWasmLinkDriver.start = GBAWasmLinkStart;
+	g_gbaWasmLinkDriver.finishMultiplayer = GBAWasmLinkFinishMultiplayer;
+	g_gbaWasmLinkDriver.finishNormal32 = GBAWasmLinkFinishNormal32;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint16_t mgba_link_gba_read(void) {
+	return g_gbaWasmLinkLastTx;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void mgba_link_gba_write(uint16_t value) {
+	g_gbaWasmLinkNextRx = value;
+	g_gbaWasmLinkHasRx = true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t mgba_link_gba_read_normal32(void) {
+	return g_gbaWasmLinkLastTx32;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void mgba_link_gba_write_normal32(uint32_t value) {
+	g_gbaWasmLinkNextRx32 = value;
+	g_gbaWasmLinkHasRx32 = true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void mgba_link_gba_set_id(int id) {
+	if (id < 0) {
+		id = 0;
+	} else if (id > 3) {
+		id = 3;
+	}
+	g_gbaWasmLinkId = id;
+}
+
+#endif /* M_CORE_GBA */
 
 void GBARetroLog(struct mLogger* logger, int category, enum mLogLevel level, const char* format, va_list args) {
 	UNUSED(logger);
