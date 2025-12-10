@@ -2447,9 +2447,11 @@ static void GBWasmLinkWriteSB(struct GBSIODriver* driver, uint8_t value) {
 }
 
 static uint8_t GBWasmLinkWriteSC(struct GBSIODriver* driver, uint8_t value) {
-	/* Nieuwe transfer start wanneer enable-bit (7) van 0 -> 1 gaat, ongeacht clock-source. */
-	if ((value & 0x80) && !(g_gbWasmLinkLastSC & 0x80)) {
-		/* Capture TX-byte voor JS-bridge. */
+	/* Nieuwe transfer start telkens wanneer het enable‑bit (7) op 1 wordt
+	 * geschreven (ongeacht vorige waarde), net als in de standaard SIO‑logica.
+	 * Zo pakken we ook games die SC steeds opnieuw met bit 7 = 1 beschrijven. */
+	if (value & 0x80) {
+		/* Capture TX-byte voor JS‑bridge. */
 		g_gbWasmLinkLastTx = g_gbWasmLinkCurrentSB;
 		++g_gbWasmLinkSeq;
 		/* Neem controle over de timing: schakel de standaard
