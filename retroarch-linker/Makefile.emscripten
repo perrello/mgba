@@ -134,7 +134,7 @@ _wasm_get_system_ram_ptr,_wasm_get_system_ram_size,\
 _mgba_link_gb_read,_mgba_link_gb_write,_mgba_link_gb_get_seq,_mgba_link_gb_exchange,\
 _mgba_link_gba_read,_mgba_link_gba_write,_mgba_link_gba_set_id,\
 _mgba_link_gba_read_normal32,_mgba_link_gba_write_normal32,\
-_mgba_get_gb_model
+_mgba_get_gb_model,_mgba_set_rtc_fixed_ms,_mgba_set_rtc_real_time
 
 EXPORTS := callMain,FS,PATH,ERRNO_CODES,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply
 

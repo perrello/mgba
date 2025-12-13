@@ -151,6 +151,24 @@ static int32_t audioLowPassRange = 0;
 static int32_t audioLowPassLeftPrev = 0;
 static int32_t audioLowPassRightPrev = 0;
 
+/* RTC control helpers exposed to JavaScript (wasm) */
+EMSCRIPTEN_KEEPALIVE
+void mgba_set_rtc_fixed_ms(int64_t msecs_since_epoch) {
+	if (!core) {
+		return;
+	}
+	core->rtc.override = RTC_FIXED;
+	core->rtc.value = msecs_since_epoch;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void mgba_set_rtc_real_time(void) {
+	if (!core) {
+		return;
+	}
+	core->rtc.override = RTC_NO_OVERRIDE;
+}
+
 static const int keymap[] = {
 	RETRO_DEVICE_ID_JOYPAD_A,
 	RETRO_DEVICE_ID_JOYPAD_B,
