@@ -5,6 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "libretro.h"
 #include <emscripten/emscripten.h>
+#include <time.h>
 
 #include <mgba-util/common.h>
 
@@ -151,14 +152,26 @@ static int32_t audioLowPassRange = 0;
 static int32_t audioLowPassLeftPrev = 0;
 static int32_t audioLowPassRightPrev = 0;
 
-/* RTC control helpers exposed to JavaScript (wasm) */
+/* RTC control helpers exposed to JavaScript (wasm)
+ *
+ * Note: For the wasm build we interpret the argument to
+ * mgba_set_rtc_fixed_ms as a *desired* wallclock time in
+ * milliseconds since the Unix epoch. Internally we convert
+ * this to a RTC_WALLCLOCK_OFFSET override so that the RTC
+ * continues to advance in real time, just offset to match
+ * the requested timestamp.
+ */
 EMSCRIPTEN_KEEPALIVE
 void mgba_set_rtc_fixed_ms(int64_t msecs_since_epoch) {
 	if (!core) {
 		return;
 	}
-	core->rtc.override = RTC_FIXED;
-	core->rtc.value = msecs_since_epoch;
+	time_t now = time(0);
+	int64_t nowMs = (int64_t) now * 1000LL;
+	int64_t offsetMs = msecs_since_epoch - nowMs;
+
+	core->rtc.override = RTC_WALLCLOCK_OFFSET;
+	core->rtc.value = offsetMs;
 }
 
 EMSCRIPTEN_KEEPALIVE
