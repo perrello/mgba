@@ -5,13 +5,13 @@ CORE_NAME="mgba"
 BUILD_DIR="build-emscripten"
 OUTPUT_DIR="dist-wasm"
 
-RETROARCH_DIR="./retroarch-linker"   # Neem deze zelf op in je eigen repo
+RETROARCH_DIR="./retroarch-linker"   # Add this yourself in your own repo
 CORE_BC="${CORE_NAME}_libretro_emscripten.bc"
 
 echo "======== 1. Ensure RetroArch linker directory exists ========"
 if [ ! -d "$RETROARCH_DIR" ]; then
   echo "ERROR: retroarch-linker directory missing!"
-  echo "Kopieer de RetroArch linker map 1-op-1 in je eigen repo."
+  echo "Copy the RetroArch linker folder 1-to-1 into your own repo."
   exit 1
 fi
 
@@ -51,7 +51,7 @@ echo "======== 6. Build RetroArch WASM linker ========"
 cd "$RETROARCH_DIR"
 
 emmake make -f Makefile.emscripten LIBRETRO=${CORE_NAME} clean
-emmake make -f Makefile.emscripten LIBRETRO=${CORE_NAME} -j all VERBOSE=1
+emmake make -f Makefile.emscripten LIBRETRO=${CORE_NAME} HAVE_AL=0 -j all VERBOSE=1
 
 echo "======== 7. Export output ========"
 cp ${CORE_NAME}_libretro.js   "../$OUTPUT_DIR/${CORE_NAME}.js"
